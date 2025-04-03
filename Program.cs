@@ -12,9 +12,6 @@ class Program
     private static readonly HttpClient httpClient = new HttpClient();
     
     // Configuration variables
-    private static string rackbeatApiKey = "";
-    private static string rackbeatApiUrl = "";
-    
     private static string shopifyAccessToken = "";
     private static string shopifyShopName = "";
     
@@ -25,13 +22,11 @@ class Program
         
         try
         {
-            // Create API services
-            var rackbeatService = new RackbeatService(rackbeatApiKey, rackbeatApiUrl);
             var shopifyService = new ShopifyService(shopifyShopName, shopifyAccessToken);
             
             // Get products from Rackbeat
             Console.WriteLine("Fetching products from Rackbeat...");
-            var response = await httpClient.GetAsync("http://localhost:5000/Arch/products");
+            var response = await httpClient.GetAsync("http://api.archplus.dk/ArchPlus/products");
             if (!response.IsSuccessStatusCode)
             {
                 Console.WriteLine($"Failed to fetch products from Rackbeat. HTTP Status: {response.StatusCode}");
