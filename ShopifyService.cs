@@ -6,8 +6,78 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
+using System.Linq;
 
 namespace RackbeatShopifySync;
+
+public class StringDecimalConverter : JsonConverter<decimal>
+{
+    public override decimal Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.String)
+        {
+            string stringValue = reader.GetString();
+            if (decimal.TryParse(stringValue, out decimal value))
+            {
+                return value;
+            }
+            return 0;
+        }
+        else if (reader.TokenType == JsonTokenType.Number)
+        {
+            return reader.GetDecimal();
+        }
+        
+        return 0;
+    }
+
+    public override void Write(Utf8JsonWriter writer, decimal value, JsonSerializerOptions options)
+    {
+        writer.WriteStringValue(value.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture));
+    }
+}
+
+public class NullableStringDecimalConverter : JsonConverter<decimal?>
+{
+    public override decimal? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.Null)
+        {
+            return null;
+        }
+        else if (reader.TokenType == JsonTokenType.String)
+        {
+            string stringValue = reader.GetString();
+            if (string.IsNullOrEmpty(stringValue))
+            {
+                return null;
+            }
+            if (decimal.TryParse(stringValue, out decimal value))
+            {
+                return value;
+            }
+            return null;
+        }
+        else if (reader.TokenType == JsonTokenType.Number)
+        {
+            return reader.GetDecimal();
+        }
+        
+        return null;
+    }
+
+    public override void Write(Utf8JsonWriter writer, decimal? value, JsonSerializerOptions options)
+    {
+        if (value.HasValue)
+        {
+            writer.WriteStringValue(value.Value.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture));
+        }
+        else
+        {
+            writer.WriteNullValue();
+        }
+    }
+}
 
 public class ShopifyService
 {
@@ -37,6 +107,10 @@ public class ShopifyService
             PropertyNameCaseInsensitive = true,
             WriteIndented = true
         };
+        
+        // Add our custom converters to handle string price values
+        _serializerOptions.Converters.Add(new StringDecimalConverter());
+        _serializerOptions.Converters.Add(new NullableStringDecimalConverter());
     }
 
     /// <summary>
@@ -74,14 +148,14 @@ public class ShopifyService
 
     
     /// <summary>
-    /// Creates a new product in Shopify and publishes it to all available sales channels
+    /// Creates a new product in Shopify
     /// </summary>
     /// <param name="productNumber">The product number to create</param>
-    /// <param name="price">The product price (default: 0)</param>
+    /// <param name="price">The product price from Rackbeat (default: 0)</param>
     /// <returns>Response data for the created product</returns>
-    public async Task<ShopifyProductResponse> CreateProductAsync(string productNumber, decimal price = 0)
+    public async Task<ShopifyProductResponse> CreateProductAsync(Product product)
     {
-        Console.WriteLine($"Creating Shopify product with number: {productNumber}");
+        Console.WriteLine($"Creating Shopify product with number: {product.Number}, price: {product.SalesPrice}");
 
         try
         {
@@ -89,21 +163,21 @@ public class ShopifyService
             {
                 Product = new ShopifyProductData
                 {
-                    Title = productNumber,
+                    Title = product.Number,
                     ProductType = "RackbeatProduct",
                     Status = "active",
-                    Published = true, // Changed to true to ensure it's published
-                    BodyHtml = $"Rackbeat product reference: {productNumber}",
+                    Published = true,
+                    BodyHtml = $"Rackbeat product reference: {product.Number}",
                     Vendor = "Rackbeat",
-                    Tags = $"{productNumber},configurator-component,rackbeat-product",
+                    Tags = $"{product.Number},configurator-component,rackbeat-product",
                     Variants = new List<ShopifyVariantData>
                     {
                         new ShopifyVariantData
                         {
-                            SKU = productNumber,
-                            Barcode = productNumber,
+                            SKU = product.Number,
+                            Barcode = product.Number,
                             InventoryManagement = null, // Don't track inventory
-                            Price = price,
+                            Price = product.SalesPrice,  // Use the provided price from Rackbeat
                             CompareAtPrice = null,
                             RequiresShipping = true,
                             Taxable = true,
@@ -116,7 +190,7 @@ public class ShopifyService
                         {
                             Namespace = "rackbeat",
                             Key = "product_id",
-                            Value = productNumber,
+                            Value = product.Number,
                             Type = "single_line_text_field"
                         },
                         new ShopifyMetafieldData
@@ -151,81 +225,13 @@ public class ShopifyService
                 throw new Exception("Failed to deserialize Shopify response or product data is missing");
             }
 
-            // After creating the product, publish it to all available sales channels
-            await PublishToAllSalesChannelsAsync(result.Product.Id.Value);
-
-            Console.WriteLine($"Successfully created Shopify product with ID: {result.Product.Id}");
+            Console.WriteLine($"Successfully created Shopify product with ID: {result.Product.Id}, Price: {product.SalesPrice}");
             return result;
         }
         catch (Exception ex)
         {
             Console.WriteLine($"Exception in CreateProductAsync: {ex.Message}");
             throw;
-        }
-    }
-
-    /// <summary>
-    /// Publishes a product to all available sales channels
-    /// </summary>
-    /// <param name="productId">The ID of the product to publish</param>
-    /// <returns>A task representing the asynchronous operation</returns>
-    private async Task PublishToAllSalesChannelsAsync(long productId)
-    {
-        try
-        {
-            // First, get all available sales channels
-            var channelsResponse = await _httpClient.GetAsync($"{_baseUrl}sales_channels.json");
-            if (!channelsResponse.IsSuccessStatusCode)
-            {
-                Console.WriteLine($"Failed to get sales channels: {channelsResponse.StatusCode}");
-                return;
-            }
-            
-            var channelsContent = await channelsResponse.Content.ReadAsStringAsync();
-            var salesChannels = JsonSerializer.Deserialize<SalesChannelsResponse>(channelsContent, _serializerOptions);
-            
-            if (salesChannels?.SalesChannels == null || salesChannels.SalesChannels.Count == 0)
-            {
-                Console.WriteLine("No sales channels found");
-                return;
-            }
-            
-            // For each sales channel, publish the product
-            foreach (var channel in salesChannels.SalesChannels)
-            {
-                Console.WriteLine($"Publishing product {productId} to channel: {channel.Name} (ID: {channel.Id})");
-                
-                var publishData = new
-                {
-                    product_publication = new
-                    {
-                        product_id = productId,
-                        channel_id = channel.Id,
-                        published = true
-                    }
-                };
-                
-                var json = JsonSerializer.Serialize(publishData, _serializerOptions);
-                var content = new StringContent(json, Encoding.UTF8, "application/json");
-                
-                var publishResponse = await _httpClient.PostAsync($"{_baseUrl}product_publications.json", content);
-                
-                if (!publishResponse.IsSuccessStatusCode)
-                {
-                    var errorContent = await publishResponse.Content.ReadAsStringAsync();
-                    Console.WriteLine($"Failed to publish to channel {channel.Name}: {publishResponse.StatusCode}");
-                    Console.WriteLine($"Error details: {errorContent}");
-                }
-                else
-                {
-                    Console.WriteLine($"Successfully published product to channel {channel.Name}");
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error publishing to sales channels: {ex.Message}");
-            // Continue execution rather than letting the exception bubble up
         }
     }
 
@@ -258,6 +264,134 @@ public class ShopifyService
         catch (Exception ex)
         {
             Console.WriteLine($"Exception in SearchProductsAsync: {ex.Message}");
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Updates an existing product in Shopify
+    /// </summary>
+    /// <param name="productId">The Shopify product ID to update</param>
+    /// <param name="productNumber">The product number to update</param>
+    /// <param name="price">The product price from Rackbeat (default: 0)</param>
+    /// <returns>Response data for the updated product</returns>
+    public async Task<ShopifyProductResponse> UpdateProductAsync(long productId, Product product)
+    {
+        Console.WriteLine($"Updating Shopify product with ID: {productId}, Number: {product.Number}, Price: {product.SalesPrice}");
+
+        try
+        {
+            var shopifyProduct = new ShopifyProductRequest
+            {
+                Product = new ShopifyProductData
+                {
+                    Id = productId,
+                    Title = product.Number,
+                    ProductType = "RackbeatProduct",
+                    Status = "active",
+                    Published = true,
+                    BodyHtml = $"Rackbeat product reference: {product.Number}",
+                    Vendor = "Rackbeat",
+                    Tags = $"{product.Number},configurator-component,rackbeat-product",
+                    Variants = new List<ShopifyVariantData>
+                    {
+                        new ShopifyVariantData
+                        {
+                            SKU = product.Number,
+                            Barcode = product.Number,
+                            InventoryManagement = null, // Don't track inventory
+                            Price = product.SalesPrice,  // Use the provided price from Rackbeat
+                            CompareAtPrice = null,
+                            RequiresShipping = true,
+                            Taxable = true,
+                            Option1 = "Default",
+                        }
+                    },
+                    Metafields = new List<ShopifyMetafieldData>
+                    {
+                        new ShopifyMetafieldData
+                        {
+                            Namespace = "rackbeat",
+                            Key = "product_id",
+                            Value = product.Number,
+                            Type = "single_line_text_field"
+                        },
+                        new ShopifyMetafieldData
+                        {
+                            Namespace = "configurator",
+                            Key = "component_type",
+                            Value = "standard",
+                            Type = "single_line_text_field"
+                        }
+                    }
+                }
+            };
+
+            var json = JsonSerializer.Serialize(shopifyProduct, _serializerOptions);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            var response = await _httpClient.PutAsync($"{_baseUrl}products/{productId}.json", content);
+            var responseContent = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+            {
+                Console.WriteLine($"Shopify API Error: {response.StatusCode}");
+                Console.WriteLine($"Request URL: {_baseUrl}products/{productId}.json");
+                Console.WriteLine($"Request Body: {json}");
+                Console.WriteLine($"Response: {responseContent}");
+                throw new HttpRequestException($"Product update failed: {response.StatusCode} - {responseContent}");
+            }
+
+            var result = JsonSerializer.Deserialize<ShopifyProductResponse>(responseContent, _serializerOptions);
+            if (result?.Product == null)
+            {
+                throw new Exception("Failed to deserialize Shopify response or product data is missing");
+            }
+
+            Console.WriteLine($"Successfully updated Shopify product with ID: {result.Product.Id}, Price: {product.SalesPrice}");
+            return result;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Exception in UpdateProductAsync: {ex.Message}");
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Creates or updates a product in Shopify (overwrite if exists)
+    /// </summary>
+    /// <param name="productNumber">The product number to create or update</param>
+    /// <param name="price">The product price from Rackbeat (default: 0)</param>
+    /// <returns>Response data for the created/updated product</returns>
+    public async Task<ShopifyProductResponse> CreateOrUpdateProductAsync(Product product)
+    {
+        Console.WriteLine($"Attempting to create or update product: {product.Number}, Price: {product.SalesPrice}");
+        
+        try
+        {
+            // First, search for the product by its number
+            var existingProducts = await SearchProductsAsync(product.Number);
+            await Task.Delay(500);
+            
+            // Check if we found an exact match (by title)
+            var exactMatch = existingProducts.FirstOrDefault(p => p.Title == product.Number);
+            
+            if (exactMatch != null && exactMatch.Id.HasValue)
+            {
+                Console.WriteLine($"Found existing product '{product.Number}' with ID: {exactMatch.Id}. Updating with price: {product.SalesPrice}...");
+                return await UpdateProductAsync(exactMatch.Id.Value, product);
+                
+            }
+            else
+            {
+                Console.WriteLine($"No existing product found for '{product.Number}'. Creating new product with price: {product.SalesPrice}...");
+                return await CreateProductAsync(product);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Exception in CreateOrUpdateProductAsync: {ex.Message}");
             throw;
         }
     }
@@ -349,9 +483,13 @@ public class ShopifyVariantData
     
     [JsonPropertyName("inventory_management")] public string? InventoryManagement { get; set; }
     
-    [JsonPropertyName("price")] public decimal Price { get; set; }
+    [JsonPropertyName("price")]
+    [JsonConverter(typeof(StringDecimalConverter))]
+    public decimal? Price { get; set; }
     
-    [JsonPropertyName("compare_at_price")] public decimal? CompareAtPrice { get; set; }
+    [JsonPropertyName("compare_at_price")]
+    [JsonConverter(typeof(NullableStringDecimalConverter))]
+    public decimal? CompareAtPrice { get; set; }
     
     [JsonPropertyName("requires_shipping")] public bool RequiresShipping { get; set; }
     
@@ -371,20 +509,4 @@ public class ShopifyMetafieldData
     [JsonPropertyName("value")] public string? Value { get; set; }
     
     [JsonPropertyName("type")] public string? Type { get; set; }
-}
-
-// Add new classes for sales channels
-public class SalesChannelsResponse
-{
-    [JsonPropertyName("sales_channels")]
-    public List<SalesChannel> SalesChannels { get; set; } = new List<SalesChannel>();
-}
-
-public class SalesChannel
-{
-    [JsonPropertyName("id")]
-    public long Id { get; set; }
-    
-    [JsonPropertyName("name")]
-    public string? Name { get; set; }
 }

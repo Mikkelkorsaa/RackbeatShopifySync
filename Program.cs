@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Threading.Tasks;
 using RackbeatShopifySync;
 
@@ -13,7 +12,7 @@ class Program
     
     // Configuration variables
     private static string shopifyAccessToken = "";
-    private static string shopifyShopName = "";
+    private static string shopifyShopName = "arch-plus";
     
 
     static async Task Main(string[] args)
@@ -49,7 +48,8 @@ class Program
                 Console.WriteLine($"Successfully fetched {products.Count} products from Rackbeat");
                 
                 int created = 0;
-                int skipped = 0;
+                int updated = 0;
+                int errors = 0;
                 
                 // Now you can iterate through products and process them
                 foreach (var product in products)
@@ -57,52 +57,55 @@ class Program
                     Console.WriteLine($"Processing: {product.Name}, Number: {product.Number}");
                     
                     try {
-                        // First check if the product exists by searching for it directly
+                        // Get the price from Rackbeat product
+                        decimal price = 0;
+                        
+                        // Use the SalesPrice if available, otherwise default to 0
+                        if (product.SalesPrice.HasValue)
+                        {
+                            price = product.SalesPrice.Value;
+                            Console.WriteLine($"Using Rackbeat price: {price} for product {product.Number}");
+                        }
+                        else
+                        {
+                            Console.WriteLine($"No price found for product {product.Number}. Using default price 0.");
+                        }
+                        
+                        // Use the new CreateOrUpdateProductAsync method with the price
+                        // This will overwrite the product if it exists instead of skipping it
+                        var result = await shopifyService.CreateOrUpdateProductAsync(product);
+                        await Task.Delay(500);
+                        
+                        // Determine if this was a creation or update operation
                         var searchResults = await shopifyService.SearchProductsAsync(product.Number);
-                        bool exists = searchResults.Any(p => 
-                            p.Title?.Equals(product.Number, StringComparison.OrdinalIgnoreCase) == true ||
-                            (p.Tags != null && p.Tags.Contains(product.Number)));
+                        Task.Delay(500);
+                        bool existedBefore = searchResults.Count > 1 || 
+                            (searchResults.Count == 1 && searchResults[0].Id != result.Product?.Id);
                         
-                        if (exists)
+                        if (existedBefore)
                         {
-                            Console.WriteLine($"Product {product.Number} already exists in Shopify. Skipping...");
-                            skipped++;
-                            continue;
+                            Console.WriteLine($"Updated existing Shopify product with ID: {result.Product?.Id}, Title: {result.Product?.Title}");
+                            updated++;
                         }
-                    
-                        Console.WriteLine($"Syncing product {product.Number} to Shopify...");
-                        
-                        try
+                        else
                         {
-                            var shopifyProduct = await shopifyService.CreateProductAsync(product.Number);
-                            Console.WriteLine($"Created Shopify product with ID: {shopifyProduct.Product?.Id}, Title: {shopifyProduct.Product?.Title}");
+                            Console.WriteLine($"Created new Shopify product with ID: {result.Product?.Id}, Title: {result.Product?.Title}");
                             created++;
-                            
-                            // Add a small delay to avoid rate limiting
-                            await Task.Delay(500);
                         }
-                        catch (HttpRequestException ex) when (ex.Message.Contains("422"))
-                        {
-                            // 422 often means this product already exists but wasn't caught by our search
-                            Console.WriteLine($"Product {product.Number} appears to already exist (422 error). Skipping...");
-                            skipped++;
-                        }
-                        catch (Exception ex)
-                        {
-                            Console.WriteLine($"Error syncing product {product.Number} to Shopify: {ex.Message}");
-                            if (ex.InnerException != null)
-                            {
-                                Console.WriteLine($"Inner exception: {ex.InnerException.Message}");
-                            }
-                        }
+                        
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"Error searching for product {product.Number}: {ex.Message}");
+                        Console.WriteLine($"Error processing product {product.Number}: {ex.Message}");
+                        if (ex.InnerException != null)
+                        {
+                            Console.WriteLine($"Inner exception: {ex.InnerException.Message}");
+                        }
+                        errors++;
                     }
                 }
                 
-                Console.WriteLine($"Sync summary: {created} products created, {skipped} products skipped (already exist)");
+                Console.WriteLine($"Sync summary: {created} products created, {updated} products updated, {errors} errors");
             }
             else
             {
@@ -117,20 +120,4 @@ class Program
         
         Console.WriteLine("Sync completed");
     }
-}
-
-// Add this class to deserialize the products response
-public class ProductsResponse
-{
-    [JsonPropertyName("products")]
-    public List<Product> Products { get; set; } = new List<Product>();
-}
-
-public class Product
-{
-    [JsonPropertyName("number")]
-    public string Number { get; set; } = "";
-    
-    [JsonPropertyName("name")]
-    public string Name { get; set; } = "";
 }
